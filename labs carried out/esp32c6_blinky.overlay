@@ -1,0 +1,16 @@
+#include <zephyr/dt-bindings/gpio/gpio.h>
+
+/ {
+	aliases {
+		led0 = &blinky_led;
+	};
+
+	leds {
+		compatible = "gpio-leds";
+		blinky_led: led_0 {
+			gpios = <&gpio0 11 GPIO_ACTIVE_HIGH>;
+			label = "Blinky LED";
+		};
+	};
+};
+
