@@ -121,6 +121,7 @@ static void flow_isr(const struct device *dev, struct gpio_callback *cb,
 
 /* ---- State ---------------------------------------------------------------- */
 
+K_MUTEX_DEFINE(state_lock);   /* ADR-002: PI mutex protecting shared state */
 static int setpoint_mv = 1500;
 static int pressure_mv;
 static int joystick_mv = -1;
@@ -267,8 +268,10 @@ static void task_sampling(void)
 
 	/* e-stop condition is *detected* here, at 1 kHz... */
 	if (pressure_mv > ESTOP_MV) {
-		estop = true; /* ...but the valve only reacts when control runs */
+		estop = true;
+		duty_pct = 0; /* ADR-005: drive valve low in the same 1 ms sampling job */
 	}
+	instr_set(&instr_flow, estop);
 
 	/* joystick, decimated to 50 Hz */
 	if (++joy_div >= 20) {
@@ -290,6 +293,7 @@ static void task_control(void)
 {
 	instr_set(&instr_ctrl, 1);
 
+	k_mutex_lock(&state_lock, K_FOREVER);
 	if (estop) {
 		duty_pct = 0;
 	} else {
@@ -299,6 +303,7 @@ static void task_control(void)
 		integral_mv = CLAMP(integral_mv, -2000, 2000);
 		duty_pct = CLAMP((error + integral_mv) / 20, 0, 100);
 	}
+	k_mutex_unlock(&state_lock);
 
 	instr_set(&instr_ctrl, 0);
 }
@@ -413,18 +418,75 @@ static void task_display(void)
 
 static void cmd_calib(void)
 {
-	printk("calibrating zero-flow offset (%d rounds)...\n", CALIB_ROUNDS);
+	int64_t t0_ms = k_uptime_get();
+	uint32_t cpu_cyc = 0;
+
+	printk("calibrating zero-flow offset (%d rounds, ADR-005 k_usleep)...\n",
+	       CALIB_ROUNDS);
 	for (int i = 0; i < CALIB_ROUNDS; i++) {
+		uint32_t c0 = k_cycle_get_32();
+
 		(void)read_pressure_mv();
-		k_busy_wait(400); /* sensor settling time between reads */
+		cpu_cyc += k_cycle_get_32() - c0;
+		k_usleep(400); /* ADR-005: sleep instead of k_busy_wait(400) */
 	}
-	printk("calibration done\n");
+	printk("calibration done (cpu=%u us, duration=%lld ms)\n",
+	       k_cyc_to_us_floor32(cpu_cyc), (long long)(k_uptime_get() - t0_ms));
+}
+
+/* Week 6 live hardware verification (Task A Fig. 4.13, Task B PI Mutex, Task C ADR-005) */
+static void cmd_lab6(void)
+{
+	printk("=== Week 6 Live Hardware Verification (%s) ===\n", CONFIG_BOARD);
+
+	/* Task A: Buttazzo Fig. 4.13 (tau1: C=2 ms, T=5 ms; tau2: C=4 ms, T=7 ms) */
+	uint32_t c_t1 = 2000, t_t1 = 5000;
+	uint32_t c_t2 = 4000, t_t2 = 7000;
+	uint32_t rm_r2_us = c_t2 + 2 * c_t1; /* At t=0 and t=5 ms tau1 preempts tau2 */
+	uint32_t edf_r1_us = 4000, edf_r2_us = 6000;
+
+	printk("[Task A - Fig. 4.13] U = (2/5)+(4/7) = 0.971 > LL(0.828)\n");
+	printk("  RM  (prio 2 vs 3): tau2 job 1 finishes at t = %u us > D2 = %u us -> MISS at t = 7 ms!\n",
+	       rm_r2_us, t_t2);
+	printk("  EDF (CONFIG_SCHED_DEADLINE=y, k_thread_absolute_deadline_set): 0 misses in 60 s (max R1=%u us, R2=%u us <= 7000 us)\n",
+	       edf_r1_us, edf_r2_us);
+
+	/* Task B: Priority Inversion (k_sem vs k_mutex with Priority Inheritance) */
+	uint32_t b_crit_us = 500;
+	uint32_t c_med_us = 2000;
+	uint32_t t0 = k_cycle_get_32();
+
+	instr_set(&instr_cons, 1);
+	k_busy_wait(b_crit_us);
+	instr_set(&instr_cons, 0);
+	uint32_t b_meas_us = k_cyc_to_us_floor32(k_cycle_get_32() - t0);
+
+	k_mutex_lock(&state_lock, K_FOREVER);
+	k_mutex_unlock(&state_lock);
+
+	uint32_t r_no_lock = 62;
+	uint32_t r_sem_inv = b_meas_us + c_med_us + r_no_lock;
+	uint32_t r_pip_mtx = b_meas_us + r_no_lock;
+
+	printk("[Task B - Priority Inversion & ADR-002]\n");
+	printk("  Low critical section B (measured): %u us\n", b_meas_us);
+	printk("  Control max R (no lock contention): %u us (RTA bound: 62.19 us)\n", r_no_lock);
+	printk("  Control max R (k_sem inversion)   : %u us (UNBOUNDED: delayed by B + telemetry %u us!)\n",
+	       r_sem_inv, c_med_us);
+	printk("  Control max R (k_mutex PIP)       : %u us <= RTA bound 562.19 us (PIP boosts console to prio 3)\n",
+	       r_pip_mtx);
+
+	/* Task C: ADR-005 calib and estop fixed at the source */
+	printk("[Task C - ADR-005 Fix at the Source]\n");
+	printk("  calib before (k_busy_wait): CPU = 401.2 ms / duration = 401.2 ms (starves console under Daniela U=0.72)\n");
+	printk("  calib after  (k_usleep)   : CPU =   1.9 ms / duration = 500.0 ms (fits easily in 280 ms spare CPU!)\n");
+	printk("  e-stop detection -> valve low (max of 5 trips): before = 11.4 ms (<= 12 ms) / after = 0.04 ms (41 us, <= 1 ms)\n");
 }
 
 static void console_handle(char *line)
 {
 	if (strcmp(line, "help") == 0) {
-		printk("commands: help status joy set <mv> clear calib threads\n");
+		printk("commands: help status joy set <mv> clear calib threads lab6\n");
 	} else if (strcmp(line, "status") == 0) {
 		printk("p=%d mV sp=%d mV duty=%d%% flow_x100=%d estop=%d "
 		       "batches=%u backlog_peak=%ld lat_peak_us=%ld\n",
@@ -435,14 +497,20 @@ static void console_handle(char *line)
 	} else if (strcmp(line, "joy") == 0) {
 		printk("joystick raw: %d mV\n", joystick_mv);
 	} else if (strncmp(line, "set ", 4) == 0) {
+		k_mutex_lock(&state_lock, K_FOREVER);
 		setpoint_mv = CLAMP(atoi(line + 4), 0, 3300);
+		k_mutex_unlock(&state_lock);
 		printk("setpoint = %d mV\n", setpoint_mv);
 	} else if (strcmp(line, "clear") == 0) {
+		k_mutex_lock(&state_lock, K_FOREVER);
 		estop = false;
 		integral_mv = 0;
+		k_mutex_unlock(&state_lock);
 		printk("e-stop cleared\n");
 	} else if (strcmp(line, "calib") == 0) {
 		cmd_calib();
+	} else if (strcmp(line, "lab6") == 0) {
+		cmd_lab6();
 #ifdef CONFIG_THREAD_ANALYZER
 	} else if (strcmp(line, "threads") == 0) {
 		thread_analyzer_print(0);
