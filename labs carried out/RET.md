@@ -1,6 +1,6 @@
 # RET — Timing Evidence Report
 
-- **Team:** `Rafael Ricardo Torres Choperena`
+- **Team:** `<names>`
 - **Boards:** `ESP32-C6-DevKitC-1 (esp32c6_devkitc/esp32c6/hpcore)`, `native_sim/native/64`
 - **AI use:** `Week 1: Antigravity (Gemini) — initial RET structure and EARS task set table.`
 
@@ -45,15 +45,45 @@ Each entry cites the `REQ`(s) it verifies.
 
 | Quantity | Prediction | Your value | Target |
 |---|---|---|---|
-| Edit → build (`-p`) → flash → message on the console, one member's laptop | 25 s | 42.33 s | < 60 s |
-| Same, incremental build (one line changed, no `-p`) | 5 s | 5.09 s | |
-| Members with blinky running from their own laptop | 1 / 1 | 1 / 1 | all |
+| Edit → build (`-p`) → flash → message on the console, one member's laptop | ____ s | ____ s | < 60 s |
+| Same, incremental build (one line changed, no `-p`) | ____ s | ____ s | |
+| Members with blinky running from their own laptop | | ____ / ____ | all |
 
 - **Task A (`blinky` on NUCLEO-L476RG):** `[Pegar foto/captura]`
 - **Task B (`hello_world` serial console + build times):** `[Pegar captura]`
 
-### Week 2 — superloop baseline (state the board)
-<jitter/latency table + a one-sentence reading>
+### Week 2 — Superloop baseline (Board: `ESP32-C6-DevKitC-1`)
+
+#### Task A — Superloop Flow & GPIO Instrumentation Diagram (≤ 10 boxes)
+
+```mermaid
+flowchart TD
+    ISR1["ISR 1: tick_isr (1 kHz k_timer)<br/>atomic_inc(&ticks_pending); updates backlog_peak"] -.->|ticks_pending| B5
+    ISR2["ISR 2: flow_isr (GPIO3 / D9 edge)<br/>atomic_inc(&flow_pulses)"] -.->|flow_pulses| B8
+    B1["1. init_hw() + k_timer_start(1 ms)"] --> B2
+    B2["2. task_console() — GPIO20 / D5 (instr_cons)<br/>Polls UART; runs help/status/set/clear/calib"] --> B3
+    B3["3. task_display() — GPIO23 / D8 (instr_disp)<br/>Every 500 ms (if enabled): pushes 1 KB I2C frame"] --> B4
+    B4["4. task_telemetry() — GPIO21 / D6 (instr_tele)<br/>Every 1000 ms: polled printk CSV (~7 ms @ 115200)"] --> B5
+    B5{"5. ticks_pending > 0 ?"} -->|Yes: atomic_dec| B6
+    B5 -->|No| B8
+    B6["6. task_sampling() — GPIO18 / D3 (instr_samp)<br/>Reads pressure_mv, checks estop (>3000 mV), updates PWM"] --> B7
+    B7["7. Every 10th sample (10 ms): task_control() — GPIO19 / D4 (instr_ctrl)<br/>Computes PI duty_pct (or 0% if estop)"] --> B8
+    B8["8. task_flow_batch() — GPIO22 / D7 (instr_flow)<br/>If flow_pulses >= 100: clears & runs 50x float filter"] --> B2
+```
+
+#### Task B & Task C — Superloop Baseline & Blocking Command Table
+
+| Measurement | Verifies | Prediction | Your value | Reference |
+|---|---|---|---|---|
+| Actual sampling period (nominal 1 kHz): average | `REQ-SAMP-01` | 1000 µs | `[En espera analizador]` µs | 1000 µs |
+| Sampling jitter: max over ≥ 30 s (idle) | `REQ-SAMP-01` | ~7000 µs | `[En espera analizador]` µs | *Course baseline* (polled UART telemetry) |
+| ISR → loop-service latency (flow pulse) | `REQ-SAMP-01` | ~50 µs | `[En espera analizador]` µs | |
+| Sampling jitter, max, **with the flash cache off** | `REQ-SAMP-01` | ~8000 µs | `[En espera analizador]` µs | ART accelerator gap (STM32L4) |
+| Sampling jitter **with the blocking command (`calib`) active** | `REQ-SAMP-01`, `REQ-CTRL-01` | > 400 000 µs | `[En espera analizador]` µs | Compare against row 2 |
+| `backlog_peak`, idle → during the blocking command (`calib`) | `REQ-SAMP-01`, `REQ-CTRL-01` | ~7 → ~410 ticks | **`4 → 403` ticks** | Counted by firmware via `status` |
+
+- **Baseline reading (one sentence):** Even in idle operation without user commands, the synchronous `printk` in `task_telemetry()` (~4–5 ms at 115200 baud every 1 s) blocks the single-threaded superloop, accumulating **4 missed 1 kHz sampling ticks (`backlog_peak = 4`)**.
+- **Task C — Root-cause explanation of the degradation (with line of code):** When the `calib` command is issued on the UART console, `task_console()` synchronously invokes `cmd_calib()` (`firmware/superloop/src/main.c`, lines 394–402), which runs a `for` loop of `CALIB_ROUNDS` (1000 iterations) calling `k_busy_wait(400)` on **line 399** plus `read_pressure_mv()`. Because there is no preemptive scheduler, `task_console()` monopolizes the CPU for ~403 ms while `tick_isr` continues incrementing `ticks_pending` every 1 ms in the background, starving the hard real-time tasks (`task_sampling`, `task_control`, and `estop` actuation) and pushing `backlog_peak` from **4 ticks to 403 ticks** (violating `REQ-SAMP-01`, `REQ-CTRL-01`, and `REQ-ESTOP-01`).
 
 ## 4. Schedulability analysis
 
