@@ -188,11 +188,11 @@ flowchart TD
 | Fig. 4.13 under RM: who misses, when? | `tau2` misses at $t = 7\text{ ms}$ | **`tau2` finishes at $t = 8000\text{ µs} > D_2 = 7000\text{ µs}$ (MISS at $t = 7\text{ ms}$)** | book: $\tau_2$ at $t = 7\text{ ms}$ |
 | Fig. 4.13 under EDF: misses in 60 s | `0` misses | **`0` misses in 60 s (max $R_1 = 4000\text{ µs}$, max $R_2 = 6000\text{ µs}$)** | book: none, $U \approx 0.97 \le 1$ |
 | Control's max $R$, no lock contention | `~62 µs` | **`62.0 µs` (RTA bound: `62.19 µs`; CTF from ISR: `289.75 µs`)** | your RTA script |
-| Control's max $R$ during inversion (`k_sem` as lock) | `> 2500 µs` | **`2562.0 µs` (delayed by $B = 500\text{ µs}$ + `telemetry` $C = 2000\text{ µs}$)** | — (that's what's broken) |
-| Control's max $R$ with a `k_mutex` (PIP) | `<= 563 µs` | **`562.0 µs` $\le$ RTA bound `562.19 µs` ($C_{\text{ctrl}} + B + C_{\text{samp}}$)** | $\le C + B + \text{interference}$ |
-| $B$: the low thread's longest critical section | `500 µs` | **`500.0 µs` (measured on `instr_cons` / cycle counter)** | its GPIO pulse |
+| Control's max $R$ during inversion (`k_sem` as lock) | `> 2500 µs` | **`2566 µs` (delayed by $B = 504\text{ µs}$ + `telemetry` $C = 2000\text{ µs}$)** | — (that's what's broken) |
+| Control's max $R$ with a `k_mutex` (PIP) | `<= 563 µs` | **`566 µs` $\le$ RTA bound `566.19 µs` ($C_{\text{ctrl}} + B_{504} + C_{\text{samp}}$)** | $\le C + B + \text{interference}$ |
+| $B$: the low thread's longest critical section | `500 µs` | **`504 µs` (measured live on ESP32-C6 via `lab6`)** | its GPIO pulse |
 | `calib` CPU / duration, before the fix (`k_busy_wait`) | `400 / 401 ms` | **`401.2 ms` CPU / `401.2 ms` duration** | it spins: CPU = duration |
-| `calib` CPU / duration, after the fix (`k_usleep`) | `~2 / ~500 ms` | **`1.9 ms` CPU / `500.0 ms` duration** | sleeps $400\text{ µs}$ per round |
+| `calib` CPU / duration, after the fix (`k_usleep`) | `~2 / ~500 ms` | **`2.27 ms` (`2272 µs`) CPU / `2000 ms` (@ 1 kHz tick on C6; `500 ms` @ 10 kHz tick)** | sleeps $400\text{ µs}$ per round |
 | E-stop, detection → valve low, max of 5 trips, before / after | `~12 ms / < 1 ms` | **`11.4 ms` (before) / `0.04 ms` [`41 µs`] (after ADR-005)** | sum the path in Task C |
 
 ## 4. Schedulability analysis
